@@ -1,0 +1,21 @@
+# Local Android build output and development signing key.
+android/build/
+android/.signing/
+releases/*.apk
+releases/*.sha256
+
+.DS_Store
+
+# Local tooling, credentials and unpublished research.
+.openai/
+.android-toolchain/
+research/
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.pem
+*.p12
+__pycache__/
+node_modules/

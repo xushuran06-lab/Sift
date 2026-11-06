@@ -1,0 +1,60 @@
+const vm=require('node:vm');const fs=require('node:fs');const assert=require('node:assert/strict');
+const nodes=new Map();function node(id){if(!nodes.has(id))nodes.set(id,{innerHTML:'',hidden:false,style:{},dataset:{},classList:{add(){},remove(){}},setAttribute(){},addEventListener(){},focus(){},isConnected:true});return nodes.get(id);}
+const store=new Map(),listeners=[];
+const ctx=vm.createContext({console,Date,Intl,URL,Blob,TextEncoder,Set,Map,Math,JSON,Promise,setTimeout,clearTimeout,crypto:require('node:crypto').webcrypto,localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)},document:{querySelector:node,querySelectorAll:()=>[],body:{style:{},appendChild(){}},createElement:()=>node('new'),addEventListener:(...a)=>listeners.push(a),activeElement:null},location:{hash:''},window:{addEventListener(){},scrollTo(){}},FileReader:function(){},FormData:function(){}});ctx.window=ctx;ctx.addEventListener=()=>{};ctx.scrollTo=()=>{};
+for(const f of ['core.js','content-core.js','scope-core.js','workflow-core.js','app.js','brain.js','minimal.js','focus.js','workflow.js'])vm.runInContext(fs.readFileSync('dist/'+f,'utf8'),ctx,{filename:f});
+assert.match(node('#main').innerHTML,/选择信息源/);assert.doesNotMatch(node('#main').innerHTML,/brain-hero/);assert.doesNotMatch(node('#main').innerHTML,/<svg viewBox="0 0 400/);
+assert.match(node('#nav').innerHTML,/资料库/);
+vm.runInContext("page='library';render()",ctx);assert.match(node('#main').innerHTML,/稍后看/);
+vm.runInContext("capture('text')",ctx);assert.match(node('#modal-content').innerHTML,/添加内容/);assert.match(node('#modal-content').innerHTML,/笔记正文/);
+vm.runInContext("page='opportunities';render()",ctx);assert.match(node('#main').innerHTML,/只看你关心的来源/);
+vm.runInContext("page='settings';render()",ctx);assert.match(node('#main').innerHTML,/管理来源/);
+vm.runInContext("contentDetail('brain-agent')",ctx);assert.match(node('#modal-content').innerHTML,/把 AI Agent/);assert.doesNotMatch(node('#modal-content').innerHTML,/viewBox="0 0 400/);
+console.log('PASS: all nine scripts initialize together; home, library, capture, opportunities, settings and detail views render; decorative artwork is absent.');
+
+vm.runInContext("state.enabled=['volunteer'];taskState='all';page='today';render()",ctx);
+assert.match(node('#main').innerHTML,/校园图书馆/);assert.doesNotMatch(node('#main').innerHTML,/智能计算实验室|AI Agent 实践分享会/);
+vm.runInContext("page='digest';render()",ctx);assert.doesNotMatch(node('#main').innerHTML,/先建立一套|联系导师前/);
+vm.runInContext("state.enabled=['ai'];render()",ctx);assert.match(node('#main').innerHTML,/先建立一套/);assert.doesNotMatch(node('#main').innerHTML,/联系导师前/);
+vm.runInContext("state.sourceModes.ai='opportunities';render()",ctx);assert.doesNotMatch(node('#main').innerHTML,/先建立一套/);
+assert.equal(vm.runInContext('navs.length',ctx),3);
+assert.equal(vm.runInContext('state.brain.items.length>0',ctx),true);
+console.log('PASS: three destinations; only selected-source opportunities and summaries appear; mode changes hide summaries; existing library survives.');
+
+vm.runInContext("state.enabled=['ai'];state.sourceModes.ai='summary';state.sourceSummaries=[{id:'custom',sourceId:'volunteer',title:'Excluded secret',summary:'hidden',source:'secret'}];var exported='';download=(name,content)=>{exported=content;};",ctx);
+const clickHandler=listeners.find(([type,fn])=>type==='click'&&fn.toString().includes("case'export-digest'"))[1];
+clickHandler({target:{closest:()=>({dataset:{action:'export-digest'},disabled:false})}});
+assert.match(vm.runInContext('exported',ctx),/先建立一套/);assert.doesNotMatch(vm.runInContext('exported',ctx),/Excluded secret|hidden|联系导师前/);
+vm.runInContext("state.sourceSummaries=[{id:'safe',sourceId:'ai',title:'<script>alert(1)</script>',summary:'<img src=x onerror=alert(1)>',category:'note',source:'<b>source</b>',label:'local'}];page='digest';render()",ctx);
+assert.doesNotMatch(node('#main').innerHTML,/<script>alert|<img src=x/);assert.match(node('#main').innerHTML,/&lt;script&gt;/);
+console.log('PASS: Markdown export excludes unselected-source summaries; user-provided summary fields are HTML escaped.');
+
+// Exercise the actual workflow submit/ingest handlers, including persistence failures.
+ctx.FormData=class {constructor(form){this.data=form.data;}get(key){return this.data[key]??null;}getAll(key){const v=this.get(key);return Array.isArray(v)?v:v==null?[]:[v];}has(key){return this.get(key)!==null;}};
+const workflowSubmit=listeners.find(([type,fn])=>type==='submit'&&fn.toString().includes("form.id==='workflow-prefs'"))[1];
+const submit=(id,data,extra={})=>workflowSubmit({target:{id,data,dataset:{},...extra},preventDefault(){}});
+submit('workflow-prefs',{grade:'大一',include:'线性代数',exclude:'收费',types:['homework'],opportunityMode:'daily',reviewMode:'weekly',digestTime:'20:30'});
+assert.equal(vm.runInContext('state.workflow.grade',ctx),'大一');
+vm.runInContext("state.enabled=['college'];state.sourceModes.college='both';processMessage('college','【线性代数作业】\\n提交截止：2099年11月6日20:00\\n面向：大一学生\\n提交方式：教学平台上传PDF');page='today';taskState='pending';render()",ctx);
+assert.match(node('#main').innerHTML,/线性代数作业/);assert.match(node('#main').innerHTML,/教学平台上传PDF/);
+const importedId=vm.runInContext('state.items[0].id',ctx);
+const beforeBlocked=vm.runInContext('state.items.length+state.sourceSummaries.length',ctx);
+vm.runInContext("processMessage('ai','Do not retain private source')",ctx);
+assert.equal(vm.runInContext('state.items.length+state.sourceSummaries.length',ctx),beforeBlocked);
+assert.match(node('#simulation-result').innerHTML,/没有保存/);
+submit('task-form',{title:'核对后的作业',type:'homework',deadline:'2099-11-07T18:00',eventTime:'自行安排',location:'课程平台',eligibility:'大一学生',actionText:'上传PDF'},{dataset:{id:importedId}});
+assert.equal(vm.runInContext('state.items[0].deadline',ctx),'2099-11-07T10:00:00.000Z');
+assert.match(vm.runInContext('state.items[0].raw',ctx),/2099年11月6日20:00/,'Editing never changes the original evidence');
+submit('quick-save-form',{shared:'知乎测试资料 https://www.zhihu.com/question/sift-test',title:'',intent:'later'});
+assert.equal(vm.runInContext('state.brain.items[0].platform',ctx),'知乎');
+const contentId=vm.runInContext('state.brain.items[0].id',ctx),count=vm.runInContext('state.brain.items.length',ctx);
+submit('quick-save-form',{shared:'同一链接 https://www.zhihu.com/question/sift-test',title:'',intent:'later'});
+assert.equal(vm.runInContext('state.brain.items.length',ctx),count,'Duplicate shares are rejected');
+submit('content-plan-form',{intent:'reference',purpose:'写项目时备查',reviewDate:''},{dataset:{id:contentId}});
+assert.equal(vm.runInContext('state.brain.items[0].watch',ctx),false);
+const write=ctx.localStorage.setItem;ctx.localStorage.setItem=()=>{throw Error('quota');};
+const prefsBefore=vm.runInContext('JSON.stringify(state.workflow)',ctx);
+submit('workflow-prefs',{grade:'大四',include:'different',types:[],opportunityMode:'instant',reviewMode:'daily',digestTime:'01:00'});
+assert.equal(vm.runInContext('JSON.stringify(state.workflow)',ctx),prefsBefore,'A failed preference write is rolled back');
+ctx.localStorage.setItem=write;
+console.log('PASS: real handlers persist preferences, ingest selected-source homework, keep original evidence after edits, deduplicate quick shares, separate reference content and roll back failed writes.');
